@@ -36,13 +36,14 @@ def transition(model,parname,val,KN0=33.22430956,KNST=31.45765379,do_print=True,
         data['KN_path'] = np.linspace(KN_initial,KN_terminal,model.par.N_trans)
 
         # d. save data ERROR
-        #outfile = 'data/' + parname + '_ss_data.npz' 
+        #outfile = 'data/' + parname + '_ss_data.pkl' 
         #pickle.dump(data,open(outfile,'wb'))
 
     else:
-        print('Not implemented')
+        print('Not implemented correctly yet')
         # a. load saved data ERROR
-        #loadfile = 'data/' + parname + '_ss_data.npz'
+        #setattr(par,parname,val)
+        #loadfile = 'data/' + parname + '_ss_data.pkl'
         #data = pickle.load(open(loadfile,'rb'))
 
     # e. update HJB + KFE time-steps for transition path
@@ -53,7 +54,7 @@ def transition(model,parname,val,KN0=33.22430956,KNST=31.45765379,do_print=True,
     if do_print:
         print('Solving transition path')
 
-    for it in range(maxiter):
+    for it in range(10):
 
         # i. calculate transition given current KN path guess
         model.solve_trans(model,data=data)
@@ -67,6 +68,6 @@ def transition(model,parname,val,KN0=33.22430956,KNST=31.45765379,do_print=True,
         else: # update transition path
             data['KN_path'] = (1-step_size)*data['KN_path'] + step_size*model.sol.KN_path_new
             if do_print:
-                print(f'Current iteration = {it}, max difference = {max_diff:.8f}')
+                print(f'Current iteration = {it+1}, max difference = {max_diff:.8f}')
     
     return data['KN_path']

@@ -389,8 +389,8 @@ class TwoAssetModelContClass(ModelClass):
         par.cppthreads = 8 # number of threads used in C++ program
 
         # j. transition path parameters
-        par.T_trans = 20 # time periods transiton
-        par.N_trans = 200 # slices to split periods into
+        par.T_trans = 20*4 # time periods transiton
+        par.N_trans = 100*4 # slices to split periods into
         par.dt_trans = par.T_trans/par.N_trans # time-step transition
 
     def setup(self,**kwargs):
