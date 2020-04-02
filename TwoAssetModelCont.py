@@ -11,6 +11,7 @@ import time
 import numpy as np
 from numba import jitclass, njit, prange
 from numba import double, int32, boolean
+from scipy import optimize
  
 # local packages
 import UMFPACK
@@ -23,6 +24,7 @@ import income_process
 import solve
 import equilibrium
 import estimate
+import transition
 
 class TwoAssetModelContClass(ModelClass):
     
@@ -66,6 +68,9 @@ class TwoAssetModelContClass(ModelClass):
             ('vareps',double),
             ('zeta',double),
             ('omega',double),
+            ('Lambda',double),
+            ('firmdiscount',double),
+            ('theta',double),
             
             # c. preferences
             ('rho',double),
@@ -102,7 +107,7 @@ class TwoAssetModelContClass(ModelClass):
             
             # h. grids
 
-            # jump drif
+            # jump drift
             ('z1_width',double),
             ('z2_width',double),
             ('kz_1',double),
@@ -191,7 +196,12 @@ class TwoAssetModelContClass(ModelClass):
 
             # used in solve
             ('switch_diag',double[:]),
-            ('switch_off',double[:,:]),            
+            ('switch_off',double[:,:]),
+
+            # transition
+            ('T_trans',int32),
+            ('N_trans',int32),
+            ('dt_trans',double),                     
             
         ]
 
@@ -239,12 +249,23 @@ class TwoAssetModelContClass(ModelClass):
             ('centdiag',double[:,:]),
             ('b_lowdiag',double[:,:]),
             ('a_lowdiag',double[:,:]),
-        
+            
+            # transition
             ('a_updiag_trans',double[:,:,:]),
             ('b_updiag_trans',double[:,:,:]),
             ('centdiag_trans',double[:,:,:]),
             ('b_lowdiag_trans',double[:,:,:]),
             ('a_lowdiag_trans',double[:,:,:]),
+
+            ('d_trans',double[:,:,:,:]),
+            ('d_adj_trans',double[:,:,:,:]),
+            ('s_trans',double[:,:,:,:]),
+            ('h_trans',double[:,:,:,:]),
+
+            #('dK',double[:]), for Broyden method, currently inactive
+            ('g_trans',double[:,:,:]),
+            ('KN_path_new',double[:]),
+
 
         ]
 
@@ -290,6 +311,7 @@ class TwoAssetModelContClass(ModelClass):
         par.vareps = 10 # Dixit-Stiglitz elasticty
         par.zeta = 0.997047259125388 # labor efficiency scale
         par.omega = par.alpha # share of profits distributed to illiquid account
+        par.theta = 100 # price adjustment cost
 
         # c. preferences
         par.rho = 0.012728925130000 # subjective time preference rate
@@ -322,7 +344,7 @@ class TwoAssetModelContClass(ModelClass):
 
         # g. government
         par.labtax = 0.3 # labor income tax
-        par.lumpsum_transfer = 0.104347826086957 # lump-sum transfer
+        par.lumpsum_transfer = 0.104347826086957 # lump-sum transfer, exogeneous right now
         
         # h. grids
 
@@ -364,7 +386,12 @@ class TwoAssetModelContClass(ModelClass):
         par.dmax = 1e10  # maximum deposit, for numerical stability while converging
         par.cmin = 1e-5 # minimum consumption
         par.ltau = 15 # if ra>>rb, impose tax on ra*a at high a, otherwise some households accumulate infinite illiquid wealth
-        par.cppthreads = 20 # number of threads used in C++ program
+        par.cppthreads = 8 # number of threads used in C++ program
+
+        # j. transition path parameters
+        par.T_trans = 20 # time periods transiton
+        par.N_trans = 200 # slices to split periods into
+        par.dt_trans = par.T_trans/par.N_trans # time-step transition
 
     def setup(self,**kwargs):
         """ choose baseline parameters """
@@ -383,7 +410,8 @@ class TwoAssetModelContClass(ModelClass):
         for key,val in kwargs.items():
             setattr(self.par,key,val) # like par.key = val
 
-    def create_grids(self):
+
+    def create_grids(self,retirement=False):
         """ create grids (automatically called with .solve()) """
 
         par = self.par
@@ -400,6 +428,7 @@ class TwoAssetModelContClass(ModelClass):
 
         # grids
         par.Nz = par.Nz1*par.Nz2
+        if retirement: par.Nz += 1 # add retirement state with cyclical boundary
         par.Nb = par.Nb_pos + par.Nb_neg
         par.Nab = par.Nb*par.Na       
         par.Nzab = par.Nz*par.Nb*par.Na
@@ -433,10 +462,11 @@ class TwoAssetModelContClass(ModelClass):
         par.dbb = np.append(1,np.diff(par.grid_b)) # backward step sizes
 
         # grid_z
-        par.grid_z_log,_,par.z_markov,par.z_dist = income_process.construct_jump_drift(par)   
+        par.grid_z_log,_,par.z_markov,par.z_dist = income_process.construct_jump_drift(par,retirement=retirement)   
         par.grid_z_log = par.grid_z_log/(1+par.z_log_scale*par.varphi)
         par.grid_z = np.exp(par.grid_z_log)
         par.grid_z = par.zeta*par.grid_z/np.sum(par.z_dist*par.grid_z)
+        if retirement: par.grid_z[-1] = par.grid_z[0] # correct retirement state
     
         # full grids
         par.zzz,par.aaa,par.bbb = np.meshgrid(par.grid_z,par.grid_a,par.grid_b,indexing='ij')
@@ -465,7 +495,7 @@ class TwoAssetModelContClass(ModelClass):
         par.DAB_updiag2 = np.append(np.zeros(par.Na),np.diag(DAB_tilde,par.Na))
         par.DAB_lowdiag2 = np.append(np.diag(DAB_tilde,-par.Na),np.zeros(par.Na))
 
-    def solve(self,do_print=True,print_freq=100,v0=None,g0=None,solmethod=None):
+    def solve(self,do_print=True,print_freq=100,v0=None,g0=None,solmethod=None,retirement=False):
         """ solve model """
 
         par = self.par
@@ -473,7 +503,7 @@ class TwoAssetModelContClass(ModelClass):
         
         # a. create grids
         t0 = time.time()
-        self.create_grids()
+        self.create_grids(retirement=retirement)
         if do_print: 
             print(f'Grids created in {elapsed(t0)}')
 
@@ -489,6 +519,7 @@ class TwoAssetModelContClass(ModelClass):
 
         # value function
         if v0 is None:
+
             h_guess = 1/3
             c = par.wtilde*h_guess*par.zzz + par.lumpsum_transfer + (par.rb+par.eta)*par.bbb
             sol.v[:] = modelfuncs.util(par,c,h_guess)/(par.rho+par.eta)
@@ -521,9 +552,36 @@ class TwoAssetModelContClass(ModelClass):
         # f. calculate moments
         self.calculate_moments()
 
+    def solve_trans(self,do_print=True,print_freq=100,data=None,g0=None,solmethod=None,retirement=False):
+
+        # print not implemented yet
+
+        par = self.par
+        sol = self.sol
+
+        # a. create grids
+        t0 = time.time()
+        self.create_grids(retirement=retirement)
+
+        # b. set solution method
+        if solmethod is None: 
+            solmethod = self.solmethod
+
+        # c. prep
+        t0 = time.time()
+        self.ast = solve.prep(par,sol,solmethod)
+
+        # d. set solution method
+        if solmethod is None: 
+            solmethod = self.solmethod
+
+        # e. solve transition path
+        solve.solve_HJB_trans(self,data=data)
+        solve.solve_KFE_trans(self,data=data)
+        
+
     def calculate_moments(self,do_MPC=False):
         """ calculate moments """
-        
         par = self.par
         sol = self.sol
         moms = self.moms = {}
@@ -574,6 +632,7 @@ class TwoAssetModelContClass(ModelClass):
         
         # sums
         moms['N_supply'] = np.sum(moms['margdist']*sol.h*par.zzz)
+        moms['H_supply'] = np.sum(moms['margdist']*sol.h)
         moms['WageIncome'] = par.w*moms['N_supply']        
         a_supply_dist = moms['margdist']*par.grid_a.reshape(1,par.Na,1)
         moms['A_supply'] = np.sum(a_supply_dist)
@@ -652,7 +711,7 @@ class TwoAssetModelContClass(ModelClass):
         moms['KY'] = moms['K_supply'] / (4*moms['Y'])
         moms['BY'] = moms['B_demand'] / (4*moms['Y'])
         moms['Pi'] = moms['Y']/par.vareps
-        moms['Pi_discrepancy'] = (moms['Pi']-par.Pi)/par.Pi
+        if moms['Pi'] != 0: moms['Pi_discrepancy'] = (moms['Pi']-par.Pi)/par.Pi
 
         # d. MPC
         if do_MPC:
@@ -666,6 +725,7 @@ class TwoAssetModelContClass(ModelClass):
             moms['MPC_margcum'] = np.cumsum(moms['MPC_margdist'])
 
         # e. compatibility with firms
+        moms['KY_firms'] = ((par.ra+par.delta)/(par.alpha*moms['N_supply']**(1-par.alpha)))**(1/(par.alpha-1)) / (4*moms['Y'])
         moms['KN_firms'] = par.alpha/(1-par.alpha)*par.w/(par.ra+par.delta)
         moms['KN_discrepancy'] = (moms['KN_firms']-moms['KN'])/moms['KN']
 
@@ -683,7 +743,7 @@ class TwoAssetModelContClass(ModelClass):
         print(f" w: {self.par.w:.3f}")
         print(f" Pi: {self.par.Pi:.3f}")
         print(f" capital-labor discrepancy: {moms['KN_discrepancy']:.8f}")
-        print(f" profit discrepancy: {moms['Pi_discrepancy']:.8f}")
+        if self.par.Pi !=0: print(f"Profit discrepancy: {self.moms['Pi_discrepancy']:.8f}")
         print('')
         print('Aggregates:')
         print(f" GDP: {moms['Y']:.3f}")
@@ -714,12 +774,28 @@ class TwoAssetModelContClass(ModelClass):
         print('')
         if 'MPC' in moms:
             print(f"MPC: {moms['MPC']:.3f}")
-        print(f"Consumption: avarage = {moms['c']:.3f}, gini = {moms['c_gini']:.3f}")
-        print(f"Value: avarage = {moms['v']:.3f}")
+        print(f"Consumption: average = {moms['c']:.3f}, gini = {moms['c_gini']:.3f}")
+        print(f"Value: average = {moms['v']:.3f}")
 
-    def find_ra(self,KN0,Pi0,use_prev_sol=False,do_print=True,step_size=0.1,tol=1e-8):
+    def find_ra_mon_comp(self,KN0,Pi0,step_size=0.1,tol=1e-8):
 
-        equilibrium.find_ra(self,KN0=KN0,Pi0=Pi0,use_prev_sol=use_prev_sol,do_print=do_print,step_size=step_size,tol=tol)
+        equilibrium.find_ra_mon_comp(self,KN0=KN0,Pi0=Pi0,step_size=step_size,tol=tol)
+
+    def find_ra_perf_comp(self,KN0,step_size=0.1,tol=1e-8,fix_zeta=False):
+
+        equilibrium.find_ra_perf_comp(self,KN0=KN0,step_size=step_size,tol=tol,fix_zeta=fix_zeta)
+
+    def transition(self,parname='rho',val=0.014,KN0=33.22430956,KNST=31.45765379,do_print=True,step_size=0.1,tol=1e-5,load=False,maxiter=100):
+
+        KN_path = transition.transition(self,parname,val,KN0,KNST,do_print,step_size,tol,load,maxiter)
+
+        return KN_path
+
+    def vary_param_GE_perf_comp(self,parname,vals,KN0,step_size=0.1,tol=1e-8,fix_zeta=False):
+
+        sim_data = equilibrium.vary_param_GE_perf_comp(self,parname,vals,KN0,step_size=step_size,tol=tol,fix_zeta=fix_zeta)
+
+        return sim_data
 
     def calibrate(self,use_prev_sol=False,do_print=True,tol=1e-3):
 

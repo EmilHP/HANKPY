@@ -130,8 +130,8 @@ def drift_matrix(Nz,zgrid,beta,delta,DriftPointsVersion=2):
     
     return drift
 
-def ergodic_dist(Nz,z_markov,delta=1):
-    """ find the ergodic distribution of a single income process component """
+def ergodic_dist(Nz,z_markov,delta=1,do_print=False,print_freq=100):
+    """ find the ergodic distribution of a income process component """
     
     # a. allocate containers
     zdist = np.zeros(Nz)
@@ -146,7 +146,7 @@ def ergodic_dist(Nz,z_markov,delta=1):
     it = 1
     lerr = 1
     
-    while lerr > 1e-14 and it < 1000:
+    while lerr > 1e-14 and it < 2000:
 
         zdist_update = np.matmul(zdist,matinv)
         zdist_update[abs(zdist_update)<1.0e-20_8] = 0.0_8
@@ -154,104 +154,125 @@ def ergodic_dist(Nz,z_markov,delta=1):
         lerr = np.amax(abs(zdist_update-zdist))
         zdist = zdist_update
         it = it + 1
+
+        if do_print and (it < 10 or it%print_freq == 0):
+            print(lerr)
     
     return zdist
 
-def combined_process(Nz1,Nz2,z1grid,z2grid,z1dist,z2dist,z1_markov,z2_markov,dt,beta=100):
-
+def combined_process(par,retirement=False,beta=100):
     # a. allocate containers for solution
-    eye1 = np.identity(Nz1)
-    eye2 = np.identity(Nz2)
-    eye = np.identity(Nz1*Nz2)
-
-    lzgrid_combined = np.zeros(Nz1*Nz2)
-    lztrans_dt_combined = np.zeros((Nz1*Nz2,Nz1*Nz2))
-    lzmarkov_combined = np.zeros((Nz1*Nz2,Nz1*Nz2))
-    lzdist_combined = np.zeros(Nz1*Nz2)
+    eye1 = np.identity(par.Nz1)
+    eye2 = np.identity(par.Nz2)
+    lzgrid_combined = np.zeros(par.Nz1*par.Nz2)
+    lztrans_dt_combined = np.zeros((par.Nz1*par.Nz2,par.Nz1*par.Nz2))
+    lzmarkov_combined = np.zeros((par.Nz1*par.Nz2,par.Nz1*par.Nz2))
+    lzdist_combined = np.zeros(par.Nz1*par.Nz2)
+    zgrid_combined = np.zeros(par.Nz1*par.Nz2)
+    ztrans_dt_combined = np.zeros((par.Nz1*par.Nz2,par.Nz1*par.Nz2))
+    zmarkov_combined = np.zeros((par.Nz1*par.Nz2,par.Nz1*par.Nz2))
+    zdist_combined = np.zeros(par.Nz1*par.Nz2)
     
-    zgrid_combined = np.zeros(Nz1*Nz2)
-    ztrans_dt_combined = np.zeros((Nz1*Nz2,Nz1*Nz2))
-    zmarkov_combined = np.zeros((Nz1*Nz2,Nz1*Nz2))
-    zdist_combined = np.zeros(Nz1*Nz2)
-    
-    # b. combined process function
-    z1trans = dt*z1_markov + eye1
-    z2trans = dt*z2_markov + eye2    
+    # c. combined process function
+    z1trans = par.dt*par.z1_markov + eye1
+    z2trans = par.dt*par.z2_markov + eye2    
     
     # c. transition matrix corresponding to dt (e.g. dt = 0.25 yields a quarterly matrix)
-    
     # i. pre-allocate solution
     z1trans_dt = z1trans.copy()
     z2trans_dt = z2trans.copy()
     
     # ii. normalize trans_dt according to dt
-    for i in range(0,int(np.floor(1.0/dt))-1):
+    for i in prange(0,int(np.floor(1.0/par.dt))-1):
         z1trans_dt = np.matmul(z1trans_dt,z1trans)
         z2trans_dt = np.matmul(z2trans_dt,z2trans)
     
     # d. get combined grid and transition matrix
     i = -1
-    for i1 in range(Nz1):
-        for i2 in range(Nz2):
-            i = i + 1
-            lzgrid_combined[i] = z1grid[i1] + z2grid[i2]
-            lzdist_combined[i] = z1dist[i1]*z2dist[i2]
+    for i1 in prange(par.Nz1):
+        for i2 in range(par.Nz2):
+            i += 1
+            lzgrid_combined[i] = par.grid_z1[i1] + par.grid_z2[i2]
+            lzdist_combined[i] = par.z1dist[i1]*par.z2dist[i2]
             
             j = -1
-            for j1 in range(Nz1):
-                for j2 in range(Nz2):
-                    j = j + 1
+            for j1 in range(par.Nz1):
+                for j2 in range(par.Nz2):
+                    j += 1
                     lztrans_dt_combined[i,j] = z1trans_dt[i1,j1]*z2trans_dt[i2,j2]
-                    if i1==j1 and i2==j2: lzmarkov_combined[i,j] = z1_markov[i1,j1] + z2_markov[i2,j2]
-                    if i1==j1 and i2!=j2: lzmarkov_combined[i,j] = z2_markov[i2,j2]
-                    if i1!=j1 and i2==j2: lzmarkov_combined[i,j] = z1_markov[i1,j1]
+                    if i1==j1 and i2==j2: lzmarkov_combined[i,j] = par.z1_markov[i1,j1] + par.z2_markov[i2,j2]
+                    if i1==j1 and i2!=j2: lzmarkov_combined[i,j] = par.z2_markov[i2,j2]
+                    if i1!=j1 and i2==j2: lzmarkov_combined[i,j] = par.z1_markov[i1,j1]
                     if i1!=j1 and i2!=j2: lzmarkov_combined[i,j] = 0
     
     # e. sort into ascending order
-    
     # i. generate sorted grid indices
     iorder = np.argsort(lzgrid_combined)
     
     # ii. sort combined grid, ytrans_dt_combined and combined markov matrix
-    for i in range(Nz1*Nz2):
+    for i in prange(par.Nz1*par.Nz2):
         zgrid_combined[i] = lzgrid_combined[iorder[i]] 
         zdist_combined[i] = lzdist_combined[iorder[i]]
-        for j in range(Nz1*Nz2):
+        for j in range(par.Nz1*par.Nz2):
             ztrans_dt_combined[i,j] = lztrans_dt_combined[iorder[i],iorder[j]]
             zmarkov_combined[i,j] = lzmarkov_combined[iorder[i],iorder[j]]
     
     # f. fix up rounding in markov matrix
     zmarkov_combined = zmarkov_combined - np.diag(np.sum(zmarkov_combined,axis=1))
-    
-    # g. find ergodic distribution by iteration
-    
-    # i. prepare solution matrices
-    z1dist_ = z1dist.copy()
-    z1dist_[0] = 0.1
-    ii = ((Nz1+1)/2-1)*Nz2 + (Nz2+1)/2
-    zdist_combined[int(ii)] = 0.9
-    mat = eye - beta*zmarkov_combined
-    matinv = np.linalg.inv(mat)
-    
-    # ii. compute ergodic distribution
-    it = 1
-    err = 1
-    
-    while err>1e-15 and it<1000:
-        zdist_combined_update = np.matmul(zdist_combined,matinv)
-        zdist_combined_update[abs(zdist_combined_update)<1.0e-20_8] = 0.0_8
-        zdist_combined_update = zdist_combined_update/np.sum(zdist_combined_update)
-        err = np.amax(abs(zdist_combined_update-zdist_combined))
-        zdist_combined = zdist_combined_update
-        it = it + 1
 
-    # iii. fix up rounding in ergodic distribution
+    # g. retirement option
+    if retirement: 
+        # # o. additional grid value
+        zgrid_combined = np.append(zgrid_combined,0)
+        # oo. additional column and row in transition matrix
+        row1 = np.array([np.zeros(par.Nz1*par.Nz2)])
+        column1 = np.array([np.repeat(par.Lambda,par.Nz1*par.Nz2+1)])
+
+        zmarkov_combined = np.append(zmarkov_combined,row1,axis=0)
+        zmarkov_combined = np.append(zmarkov_combined,column1.swapaxes(0,1),axis=1)
+
+        # ooo. correct diagonal as each row must sum to 0
+        zmarkov_combined -= np.identity(par.Nz1*par.Nz2+1)*par.Lambda
+
+        # o. additional grid value
+        zgrid_combined = np.append(zgrid_combined,np.zeros(2))
+        
+        # # oo. additional columns and rows in transition matrix
+        # # i. add row and column for absorbing state
+        # row1 = np.array([np.zeros(par.Nz1*par.Nz2)])
+        # column1 = np.array([np.repeat(par.Lambda,par.Nz1*par.Nz2+1)])
+        # zmarkov_combined = np.append(zmarkov_combined,row1,axis=0)
+        # zmarkov_combined = np.append(zmarkov_combined,column1.swapaxes(0,1),axis=1)
+
+        # # ii. correct diagonals for initial matrix
+        # zmarkov_combined -= np.identity(par.Nz1*par.Nz2+1)*(2*par.Lambda)
+        # zmarkov_combined[-1,-1] += par.Lambda
+        
+        # # iii. add additional row and column for cyclical boundary
+        # row2 = np.array([np.zeros(par.Nz1*par.Nz2+1)])
+        # column2 = np.array([np.repeat(par.Lambda,par.Nz1*par.Nz2+2)])
+        # zmarkov_combined = np.append(zmarkov_combined,row2,axis=0)
+        # zmarkov_combined = np.append(zmarkov_combined,column2.swapaxes(0,1),axis=1)
+        # zmarkov_combined[-2:,-1]= 0
+
+        # # ooo. cyclical boundary Poisson rates
+        # zmarkov_combined[-2,-1] = 1e-4
+        # zmarkov_combined[-1,-2] = 1e-4
+
+        # # oooo. correct diagonal for cyclical boundary Poisson rates
+        # zmarkov_combined[-2,-2] = -1e-4
+        # zmarkov_combined[-1,-1] = -1e-4
+
+
+    # h. find ergodic distribution by iteration
+    zdist_combined = ergodic_dist(len(zmarkov_combined),zmarkov_combined,delta=0.9,do_print=False)
+
+    # i. fix up rounding in ergodic distribution
     zdist_combined = zdist_combined/np.sum(zdist_combined)
 
     return zgrid_combined, ztrans_dt_combined, zmarkov_combined, zdist_combined
 
-def construct_jump_drift(par):
-
+def construct_jump_drift(par,retirement=False):
     # a. income process component grids
     par.grid_z1, dz1grid = income_grid(par.Nz1,par.kz_1,par.z1_width)
     par.grid_z2, dz2grid = income_grid(par.Nz2,par.kz_2,par.z2_width)
@@ -273,12 +294,7 @@ def construct_jump_drift(par):
     par.z2dist = ergodic_dist(par.Nz2,par.z2_markov)
 
     # f. combined process
-    zgrid_combined, ztrans_dt_combined, zmarkov_combined, zdist_combined = combined_process(
-        par.Nz1,par.Nz2,
-        par.grid_z1,par.grid_z2,
-        par.z1dist,par.z2dist,
-        par.z1_markov,par.z2_markov,
-        par.dt)
+    zgrid_combined, ztrans_dt_combined, zmarkov_combined, zdist_combined = combined_process(par,retirement)
 
     return zgrid_combined, ztrans_dt_combined, zmarkov_combined, zdist_combined
 

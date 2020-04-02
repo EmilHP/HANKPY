@@ -79,6 +79,7 @@ def prep(par,sol,solmethod):
     sol.daBbB_adj = np.zeros(shape)
  
     # d. solution containers
+    # i. steady-state
     sol.v = np.zeros((par.Nz,par.Na,par.Nb))    
     sol.c = np.zeros(shape)
     sol.h = np.zeros(shape)
@@ -86,6 +87,15 @@ def prep(par,sol,solmethod):
     sol.d_adj = np.zeros(shape)
     sol.s = np.zeros(shape)
     sol.g = np.zeros((par.Nz,par.Nab))
+
+    # ii. transition path
+    shape_trans = ((par.N_trans,par.Nz,par.Na,par.Nb))
+    sol.d_trans = np.zeros(shape_trans)
+    sol.d_adj_trans = np.zeros(shape_trans)
+    sol.s_trans = np.zeros(shape_trans)
+    sol.h_trans = np.zeros(shape_trans)
+    sol.g_trans = np.zeros((par.N_trans+1,par.Nz,par.Nab))
+    sol.KN_path_new = np.zeros(par.N_trans)
 
     # e. diagonals
     shape = (par.Nz,par.Nab)
@@ -249,6 +259,8 @@ def upwind(par,sol):
                     HdaBbB[index] = -1e12
                 if ia == par.Na-1: HdaFbB[index] = -1e12
                 if ib == 0: HdaFbB[index] = -1e12
+
+                # z absorbing here? If in absorbing - already in that state so index solves???
  
                 # ii. conditions
                 validFB = daFbB[index] > 0 and HdaFbB[index] > 0
@@ -276,9 +288,9 @@ def create_RHS_HJB(par,sol,ast,v_prev):
     ast.RHS_HJB[:] = par.DeltaHJB*u + v + par.DeltaHJB*ast.switch_off@v
          
 @njit(parallel=True,fastmath=True)
-def create_diags_HJB(par,sol):
+def create_diags_HJB(par,sol,social_planner=False):
     """ create diagonals """
- 
+
     # unpack
     centdiag = sol.centdiag
  
@@ -300,7 +312,7 @@ def create_diags_HJB(par,sol):
  
                 # a. set mechanical drift in a
                 a = par.grid_a[ia]
-                adrift = (par.ra + par.eta)*a - ltau0*a**par.ltau + par.xi*par.w
+                adrift = (par.ra + par.eta)*a - ltau0*a**par.ltau + par.xi*par.w # retirement, no wage
  
                 # b. find diagonals in a and b space
  
@@ -321,7 +333,7 @@ def create_diags_HJB(par,sol):
  
                 a_centdiag = a_low + a_up
                 b_centdiag = b_low + b_up
-                centdiag[iz,i] = 1 + par.DeltaHJB*(a_centdiag + b_centdiag + par.rho + par.eta - par.switch_diag[iz])
+                centdiag[iz,i] = 1 + par.DeltaHJB*(a_centdiag + b_centdiag + par.rho + (1-social_planner)*par.eta - par.switch_diag[iz])
  
                 if ia < par.Na-1: a_updiag[iz,i+par.Nb] = -par.DeltaHJB*a_up
                 if ia > 0: a_lowdiag[iz,i-par.Nb] = -par.DeltaHJB*a_low
@@ -524,7 +536,58 @@ def solve_HJB(model,do_print=True,print_freq=100,solmethod='UMFPACK'):
     #assert np.any(np.diff(sol.v,axis = 2)<-1e-8) == 0 # monotonicity in b dimension
  
     return time.time()-t0
+
+def solve_HJB_trans(model,data=None,do_print=True,print_freq=100,solmethod='UMFPACK'):
+    """ solve HJB equation """
+
+    t0 = time.time()
+
+    # unpack
+    par = model.par
+    sol = model.sol
+    ast = model.ast
+    cppfile = model.cppfile
+
+    sol.v = data['v_st']
+      
+    # solve HJB
+    for n in range(par.N_trans-1,-1,-1):
+
+        v_prev = sol.v.copy()
+
+        # 0. update variables
+        KN = data['KN_path'][n]
+        par.ra = par.alpha/(KN**(1-par.alpha)) - par.delta
+        par.w = (1-par.alpha)*KN**par.alpha
+        par.wtilde = ((1-par.xi)-par.labtax)*par.w # net wage
+
+        # i. derivatives
+        derivatives(par,sol)
+         
+        # ii. upwind scheme
+        upwind(par,sol)
  
+        # iii. RHS
+        create_RHS_HJB(par,sol,ast,v_prev)     
+ 
+        # iv. diagonals
+        create_diags_HJB(par,sol)
+         
+        # v. construct Q
+        create_Q(par,sol,ast,solmethod)
+ 
+        # vi. solve equation system
+        solve_eq_sys_HJB(par,sol,ast,solmethod,cppfile)
+
+        # vii. update d, d_adj, s and h for KFE transition
+
+        sol.d_trans[n,:,:,:] = sol.d
+        sol.d_adj_trans[n,:,:,:] = sol.d_adj
+        sol.s_trans[n,:,:,:] = sol.s
+        sol.h_trans[n,:,:,:] = sol.h       
+
+    return time.time()-t0
+
 ################
 # 4. solve KFE #
 ################
@@ -557,6 +620,8 @@ def create_diags_KFE(par,sol):
                     a_low = -np.fmin(sol.d[iz,ia,ib-1] + adrift,0)/par.dab[ia]
                     a_up = np.fmax(sol.d[iz,ia,ib-1] + adrift,0)/par.daf[ia]
                     b_low = -np.fmin(sol.s[iz,ia,ib] - sol.d_adj[iz,ia,ib-1],0)/par.dbb[ib]
+
+                # correct boundary in z? due to absorbing state. Not interested in standing still in a or b..
                  
                 # update
                 i = ib*par.Na + ia
@@ -666,6 +731,53 @@ def solve_KFE(model,do_print=True,print_freq=100,solmethod='UMFPACK'):
             if do_print and (it < 10 or it%print_freq == 0):
                 print(f'{it:5d}: {dist:.16f}')
             it += 1   
+         
+    return time.time()-t0
+
+def solve_KFE_trans(model,data,do_print=True,print_freq=100,solmethod='UMFPACK'):
+    """ solve Kolmogorov-Forward equation """
+
+    t0 = time.time()
+    
+    # unpack
+    par = model.par
+    sol = model.sol
+    ast = model.ast
+    cppfile = model.cppfile
+
+    # a. initial g
+    sol.g_trans[0,:,:] = data['g0']
+
+    # b. iterate
+    for n in range(par.N_trans):
+
+        g_prev = sol.g_trans[n,:,:]
+
+        # i. set current d, d_adj and s for diags
+        sol.d = sol.d_trans[n,:,:,:]
+        sol.d_adj = sol.d_adj_trans[n,:,:,:]
+        sol.s = sol.s_trans[n,:,:,:]
+
+        # ii. create diags current iteration
+        create_diags_KFE(par,sol)
+
+        # i. construct B
+        create_B(par,sol,ast,solmethod)
+
+        # ii. solve equation and save result
+        solve_eq_sys_KFE(par,sol,ast,g_prev,solmethod,cppfile)
+        sol.g_trans[n+1,:,:]  = sol.g
+         
+        # iii. calculate new KN
+        # o. calculate KN
+        _g = sol.g_trans[n,:,:].reshape(par.Nz,par.Na,par.Nb,order='F')
+        margdist =_g*par.dab_tilde.T
+        a_supply_dist = margdist*par.grid_a.reshape(1,par.Na,1)
+        K = np.sum(a_supply_dist)
+        N = np.sum(margdist*sol.h_trans[n,:,:,:]*par.zzz)
+
+        # oo. save KN
+        sol.KN_path_new[n] = K/N
          
     return time.time()-t0
 

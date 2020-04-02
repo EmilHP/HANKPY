@@ -108,9 +108,12 @@ def optimal_consumption(par,vb,z,b,rb,w):
         
         # i. hours
         if par.varphi == 1:
-
-            hmin = bdrift/(par.wtilde*z)/2
-            h = np.sqrt(hmin**2+1/par.chi)-hmin
+            
+            if z == 0: # retirement state
+                h = 0
+            else:
+                hmin = bdrift/(par.wtilde*z)/2
+                h = np.sqrt(hmin**2+1/par.chi)-hmin
 
         else: # not implemented
 
