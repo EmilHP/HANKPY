@@ -54,7 +54,7 @@ def transition(model,parname,val,KN0=33.22430956,KNST=31.45765379,do_print=True,
     if do_print:
         print('Solving transition path')
 
-    for it in range(10):
+    for it in range(maxiter):
 
         # i. calculate transition given current KN path guess
         model.solve_trans(model,data=data)
