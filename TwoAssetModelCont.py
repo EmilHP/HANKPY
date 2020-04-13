@@ -411,7 +411,7 @@ class TwoAssetModelContClass(ModelClass):
             setattr(self.par,key,val) # like par.key = val
 
 
-    def create_grids(self,retirement=False):
+    def create_grids(self,load_grid=False,grid_a=None,retirement=False):
         """ create grids (automatically called with .solve()) """
 
         par = self.par
@@ -439,9 +439,12 @@ class TwoAssetModelContClass(ModelClass):
         # b. construct grids
 
         # grid_a
-        par.grid_a = modelfuncs.power_spaced_grid(par.Na,par.k_a,par.a_min,par.a_max)
-        if par.Na > 10: # evenly spaced in the beginning
-            par.grid_a[0:9] = np.array(range(0,8+1))*par.grid_a[9]/9
+        if load_grid:
+            par.grid_a = grid_a
+        else:
+            par.grid_a = modelfuncs.power_spaced_grid(par.Na,par.k_a,par.a_min,par.a_max)
+            if par.Na > 10: # evenly spaced in the beginning
+                par.grid_a[0:9] = np.array(range(0,8+1))*par.grid_a[9]/9
 
         par.daf = np.append(np.diff(par.grid_a),1) # forward step sizes
         par.dab = np.append(1,np.diff(par.grid_a)) # backward step sizes
@@ -495,7 +498,7 @@ class TwoAssetModelContClass(ModelClass):
         par.DAB_updiag2 = np.append(np.zeros(par.Na),np.diag(DAB_tilde,par.Na))
         par.DAB_lowdiag2 = np.append(np.diag(DAB_tilde,-par.Na),np.zeros(par.Na))
 
-    def solve(self,do_print=True,print_freq=100,v0=None,g0=None,solmethod=None,retirement=False):
+    def solve(self,do_print=True,print_freq=100,v0=None,g0=None,solmethod=None,retirement=False,load_grid=False,grid_a=None):
         """ solve model """
 
         par = self.par
@@ -503,7 +506,7 @@ class TwoAssetModelContClass(ModelClass):
         
         # a. create grids
         t0 = time.time()
-        self.create_grids(retirement=retirement)
+        self.create_grids(retirement=retirement,load_grid=load_grid,grid_a=grid_a)
         if do_print: 
             print(f'Grids created in {elapsed(t0)}')
 
